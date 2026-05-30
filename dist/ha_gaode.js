@@ -1,6 +1,6 @@
 import "https://webapi.amap.com/loader.js"
 
-const VERSION = "V5.1.2.3"
+const VERSION = "V5.2.0.1"
 const CONFIG_DEVICE_TRACKER_INCLUDE = 'device_tracker_include'
 const CONFIG_GAODE_KEY = 'gaode_key'
 const CONFIG_GAODE_KEY_SECURITY_CODE = 'gaode_key_security_code'
@@ -24,52 +24,6 @@ const random_color = [
     "#20124d",
     "#660000",
 ]
-
-// const zone_icon = {
-//   type: 'image',
-//   image: 'https://a.amap.com/jsapi_demos/static/images/poi-marker.png',
-//   clipOrigin: [194, 92],
-//   clipSize: [50, 68],
-//   size: [25, 34],
-//   anchor: 'bottom-center',
-//   angel: 0,
-//   retina: true
-// }
-
-// const zone_text = {
-//   direction: 'top',
-//   offset: [0, -5],
-//   style: {
-//     fontSize: 13,
-//     fontWeight: 'normal',
-//     fillColor: '#fff',
-//     padding: '2, 5',
-//     backgroundColor: '#22884f'
-//   }
-// }
-
-// const gps_icon = {
-//   type: 'image',
-//   image: 'https://a.amap.com/jsapi_demos/static/images/poi-marker.png',
-//   clipOrigin: [194, 92],
-//   clipSize: [50, 68],
-//   size: [25, 34],
-//   anchor: 'bottom-center',
-//   angel: 0,
-//   retina: true
-// }
-
-// const gps_test = {
-//   direction: 'top',
-//   offset: [0, -5],
-//   style: {
-//     fontSize: 13,
-//     fontWeight: 'normal',
-//     fillColor: '#fff',
-//     padding: '2, 5',
-//     backgroundColor: '#ff2a00'
-//   }
-// }
 
 const init_html = `
 <style>
@@ -314,8 +268,8 @@ const init_html = `
           <div style="margin-bottom: 12px;">
             <div style="font-size: 0.9em; margin-bottom: 4px;">时间范围</div>
             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 4px;">
-              <input id="trajectory_start_datetime" type="datetime-local">
-              <input id="trajectory_end_datetime" type="datetime-local">
+              <input id="trajectory_start_datetime" type="datetime-local" step="60">
+              <input id="trajectory_end_datetime" type="datetime-local" step="60">
             </div>
             <div id="trajectory_error" class="error-text"></div>
           </div>
@@ -340,38 +294,74 @@ const init_html = `
 class Ha_gaode extends HTMLElement {
     constructor() {
         super()
-        // this.attachShadow({ mode: 'closed' });
+        this.mapLoading = false
+        this.zoneEdit = false
+        this.gpsEdit = false
+        this.trajectoryMode = false
+        this.editMarker = null
+        this.editMarkerCircle = null
+        this.amap = null
+        this.zoneObj = {}
+        this.gpsObj = {}
+        this.zoneMarkerObj = {}
+        this.zoneMarkerCircleObj = {}
+        this.gpsCache = {}
+        this.gpsList = []
+        this.searchMarker = null
+        this.carMarker = null
+        this.carPolyline = null
+        this.carPassedPolyline = null
+        this._hass = null
+        this.config = null
+        this.content = null
     }
-    mapLoading = false
-    zoneEdit = false
-    gpsEdit = false
-    trajectoryMode = false
-    editMarker = null
-    editMarkerCircle = null
-    amap = null
-    zoneObj = {}
-    gpsObj = {}
-    zoneMarkerObj = {}
-    zoneMarkerCircleObj = {}
-    gpsCache = {}
-    gpsList = []
-    searchMarker = null
-    carMarker = null
-    carPolyline = null
-    carPassedPolyline = null
+
+    static getConfigElement() {
+        // 返回配置编辑器（如果需要自定义配置UI，可以在这里返回）
+        return null
+    }
+
     set hass(hass) {
-        console.log(hass)
-        console.log(this.content)
-        let that = this
-        // Initialize the content if it's not there yet.
+        this._hass = hass
         if (!this.content) {
-            this.innerHTML = init_html;
-            this.content = this.querySelector("#dxMapDiv")
-            that._loadMap(hass)
-            that._drawOnce(hass)
+            if (!this.shadowRoot) {
+                this.attachShadow({ mode: 'open' })
+            }
+            this.shadowRoot.innerHTML = init_html
+            this.content = this.shadowRoot.querySelector("#dxMapDiv")
+            this._loadMap(hass)
+            this._drawOnce(hass)
         }
         this._handleHass(hass)
     }
+
+    get hass() {
+        return this._hass
+    }
+
+    _getEntityPosition(attributes) {
+        if (!attributes) return null
+
+        const lng =
+            attributes.gcj02_longitude ??
+            attributes.longitude ??
+            null
+
+        const lat =
+            attributes.gcj02_latitude ??
+            attributes.latitude ??
+            null
+
+        if (lng == null || lat == null) {
+            return null
+        }
+
+        return {
+            lng: parseFloat(lng),
+            lat: parseFloat(lat)
+        }
+    }
+
     _get_marker_options(type, friendly_name, gcj02_longitude, gcj02_latitude) {
         let basic = {
             map: this.amap,
@@ -387,6 +377,7 @@ class Ha_gaode extends HTMLElement {
         }
         return basic
     }
+
     _get_circle_options(type, radius, gcj02_longitude, gcj02_latitude) {
         let basic = {
             map: this.amap,
@@ -400,6 +391,7 @@ class Ha_gaode extends HTMLElement {
         }
         return basic
     }
+
     _get_polygon_options(type, polygon_arr) {
         const basic = {
             path: polygon_arr,
@@ -412,9 +404,10 @@ class Ha_gaode extends HTMLElement {
         }
         return basic
     }
+
     _drawWindow(hass) {
         let that = this;
-        let zoneContainer = this.querySelector("#zoneContainer")
+        let zoneContainer = this.shadowRoot.querySelector("#zoneContainer")
         zoneContainer.innerHTML = ''
         var rootTr = document.createElement(`tr`)
         rootTr.innerHTML = `
@@ -424,18 +417,24 @@ class Ha_gaode extends HTMLElement {
       <td>操作</td>
     `
         zoneContainer.appendChild(rootTr)
-        for(let zoneKey in this.zoneObj) {
+        for (let zoneKey in this.zoneObj) {
             const zone = this.zoneObj[zoneKey]
-            const { gcj02_longitude, gcj02_latitude, friendly_name, radius } = zone.attributes
+            const position = this._getEntityPosition(zone.attributes)
+            if (!position) {
+                continue
+            }
+            const gcj02_longitude = position.lng
+            const gcj02_latitude = position.lat
+            const { friendly_name, radius } = zone.attributes
             var trE = document.createElement(`tr`)
             var key = zoneKey.replaceAll('\.', '')
-            let position = ''
-            if (gcj02_longitude && gcj02_latitude) {
-                position = gcj02_longitude + "," + gcj02_latitude
+            let positionText = ''
+            if (gcj02_longitude != null && gcj02_latitude != null) {
+                positionText = gcj02_longitude + "," + gcj02_latitude
             }
             trE.innerHTML = `
           <td >${friendly_name}</td>
-          <td style='cursor: pointer' id=${key + '_ll'}>${position}</td>
+          <td style='cursor: pointer' id=${key + '_ll'}>${positionText}</td>
           <td >${parseInt(radius)}</td>
           <td>
             <button id=${key + '_edit'} dx_entity_id=${zoneKey}>编辑</button>
@@ -443,44 +442,52 @@ class Ha_gaode extends HTMLElement {
           </td>
       `
             zoneContainer.appendChild(trE)
-            let zoneKeyLl = this.querySelector(`#${key}_ll`)
-            zoneKeyLl.addEventListener('click', () => {
-                this.amap.setCenter([gcj02_longitude, gcj02_latitude])
-            });
-            let zoneKeyEdit = this.querySelector(`#${key}_edit`)
-            zoneKeyEdit.addEventListener('click', () => {
-                const entityId = zoneKeyEdit.getAttribute('dx_entity_id')
-                const zone = this.zoneObj[entityId]
-                const { friendly_name, gcj02_longitude, gcj02_latitude, radius, dx_polygon } = zone.attributes
-                var zomeForm = this._getZoneForm()
-                zomeForm.entity_id_post_input.value = zone.entity_id
-                zomeForm.friendly_name_input.value = friendly_name
-                if (gcj02_longitude && gcj02_latitude) {
-                    zomeForm.ll_input.value = gcj02_longitude + "," + gcj02_latitude
-                }
-                zomeForm.radius_input.value = radius
-                if (dx_polygon) {
-                    zomeForm.polygon_input.value = dx_polygon
-                } else {
-                    zomeForm.polygon_input.value = null
-                }
-                this._showZoneForm()
-                this._drawMap(true)
-            });
-
-            let zoneKeyDelete = this.querySelector(`#${key}_delete`)
-            zoneKeyDelete.addEventListener('click', async () => {
-                const entityId = zoneKeyDelete.getAttribute('dx_entity_id')
-                const arr = entityId.split('.')
-                await hass.callWS({
-                    type: "zone/delete",
-                    zone_id: arr[1]
+            let zoneKeyLl = this.shadowRoot.querySelector(`#${key}_ll`)
+            if (zoneKeyLl) {
+                zoneKeyLl.addEventListener('click', () => {
+                    if (this.amap) {
+                        this.amap.setCenter([gcj02_longitude, gcj02_latitude])
+                    }
                 })
-            });
+            }
+            let zoneKeyEdit = this.shadowRoot.querySelector(`#${key}_edit`)
+            if (zoneKeyEdit) {
+                zoneKeyEdit.addEventListener('click', () => {
+                    const entityId = zoneKeyEdit.getAttribute('dx_entity_id')
+                    const zone = this.zoneObj[entityId]
+                    const { friendly_name, gcj02_longitude, gcj02_latitude, radius, dx_polygon } = zone.attributes
+                    var zomeForm = this._getZoneForm()
+                    zomeForm.entity_id_post_input.value = zone.entity_id
+                    zomeForm.friendly_name_input.value = friendly_name
+                    if (gcj02_longitude != null && gcj02_latitude != null) {
+                        zomeForm.ll_input.value = gcj02_longitude + "," + gcj02_latitude
+                    }
+                    zomeForm.radius_input.value = radius
+                    if (dx_polygon) {
+                        zomeForm.polygon_input.value = dx_polygon
+                    } else {
+                        zomeForm.polygon_input.value = null
+                    }
+                    this._showZoneForm()
+                    this._drawMap(true)
+                })
+            }
+
+            let zoneKeyDelete = this.shadowRoot.querySelector(`#${key}_delete`)
+            if (zoneKeyDelete) {
+                zoneKeyDelete.addEventListener('click', async () => {
+                    const entityId = zoneKeyDelete.getAttribute('dx_entity_id')
+                    const arr = entityId.split('.')
+                    await hass.callWS({
+                        type: "zone/delete",
+                        zone_id: arr[1]
+                    })
+                })
+            }
         }
 
         // GPS
-        let gpsList = this.querySelector("#gpsList")
+        let gpsList = this.shadowRoot.querySelector("#gpsList")
         gpsList.innerHTML = ''
         var rootTr = document.createElement(`tr`)
         rootTr.innerHTML = `
@@ -489,10 +496,15 @@ class Ha_gaode extends HTMLElement {
       <td>操作</td>
     `
         gpsList.appendChild(rootTr)
-        for(let gpsKey in this.gpsObj) {
+        for (let gpsKey in this.gpsObj) {
             const gps = this.gpsObj[gpsKey]
-            const { gcj02_longitude, gcj02_latitude, friendly_name } = gps.attributes
-
+            const position = this._getEntityPosition(gps.attributes)
+            if (!position) {
+                continue
+            }
+            const gcj02_longitude = position.lng
+            const gcj02_latitude = position.lat
+            const friendly_name = gps.attributes.friendly_name || gps.entity_id
             var trE = document.createElement(`tr`)
             var key = gpsKey.replaceAll('\.', '')
             trE.innerHTML = `
@@ -503,43 +515,52 @@ class Ha_gaode extends HTMLElement {
           </td>
       `
             gpsList.appendChild(trE)
-            let gpsView = this.querySelector(`#${key}_ll`)
-            gpsView.addEventListener('click', () => {
-                this.amap.setCenter([gcj02_longitude, gcj02_latitude])
-            })
-            let gpsOper = this.querySelector(`#${key}_oper`)
-            gpsOper.addEventListener('click', () => {
-                const entityId = gpsOper.getAttribute('dx_entity_id')
-                const gps = this.gpsObj[entityId]
-                const { friendly_name, gcj02_longitude, gcj02_latitude } = gps.attributes
-
-                this._showGpsForm({
-                    position: [gcj02_longitude, gcj02_latitude],
-                    friendly_name: friendly_name,
-                    entity_id: entityId,
+            let gpsView = this.shadowRoot.querySelector(`#${key}_ll`)
+            if (gpsView) {
+                gpsView.addEventListener('click', () => {
+                    if (this.amap) {
+                        this.amap.setCenter([gcj02_longitude, gcj02_latitude])
+                    }
                 })
+            }
+            let gpsOper = this.shadowRoot.querySelector(`#${key}_oper`)
+            if (gpsOper) {
+                gpsOper.addEventListener('click', () => {
+                    const entityId = gpsOper.getAttribute('dx_entity_id')
+                    const gps = this.gpsObj[entityId]
+                    const { friendly_name, gcj02_longitude, gcj02_latitude } = gps.attributes
 
-                var gpsForm = this._getGpsForm()
-                gpsForm.gps_entity_id_post_input.value = gps.entity_id
-                gpsForm.gps_friendly_name_div.innerHTML = friendly_name
-            });
+                    this._showGpsForm({
+                        position: [gcj02_longitude, gcj02_latitude],
+                        friendly_name: friendly_name,
+                        entity_id: entityId,
+                    })
+
+                    var gpsForm = this._getGpsForm()
+                    gpsForm.gps_entity_id_post_input.value = gps.entity_id
+                    gpsForm.gps_friendly_name_div.innerHTML = friendly_name
+                })
+            }
         }
     }
+
     _toTrajectory(arr) {
         const that = this
         if (arr.length > 0) {
-            const carPolyline = new AMap.Polyline({
+            this._clearTrajectory()
+
+            this.carPolyline = new AMap.Polyline({
                 map: this.amap,
-                showDir:true,
+                showDir: true,
                 strokeColor: "#28F",
                 strokeWeight: 6,
-            });
-            const carPassedPolyline = new AMap.Polyline({
+            })
+            this.carPassedPolyline = new AMap.Polyline({
                 map: this.amap,
-                strokeColor: "#AF5",  //线颜色
-                strokeWeight: 6,      //线宽
-            });
-            const carMarker = new AMap.Marker({
+                strokeColor: "#AF5",
+                strokeWeight: 6,
+            })
+            this.carMarker = new AMap.Marker({
                 map: this.amap,
                 position: arr[0],
                 icon: "https://webapi.amap.com/images/car.png",
@@ -547,204 +568,298 @@ class Ha_gaode extends HTMLElement {
                 autoRotation: true,
                 angle: -90,
             })
-            carMarker.on('moving', function (e) {
-                console.log(e.passedPath)
-                carPassedPolyline.setPath(e.passedPath)
-            });
-            that.amap.setZoomAndCenter(17, arr[0])
-            carPolyline.setPath(arr)
-            carMarker.moveAlong(arr, 200);
-            that.trajectoryMode = true
+            this.carMarker.on('moving', function (e) {
+                that.carPassedPolyline.setPath(e.passedPath)
+            })
+            this.amap.setZoomAndCenter(17, arr[0])
+            this.carPolyline.setPath(arr)
+            this.carMarker.moveAlong(arr, 200)
+            this.trajectoryMode = true
         }
     }
+
+    _clearTrajectory() {
+        if (this.carMarker) {
+            this.amap.remove(this.carMarker)
+            this.carMarker = null
+        }
+        if (this.carPolyline) {
+            this.amap.remove(this.carPolyline)
+            this.carPolyline = null
+        }
+        if (this.carPassedPolyline) {
+            this.amap.remove(this.carPassedPolyline)
+            this.carPassedPolyline = null
+        }
+    }
+
     _closeTrajectory() {
         this.trajectoryMode = false
+        this._clearTrajectory()
         this._drawMap()
     }
-    _drawOnce(hass) {
-        let change_to_polygon = this.querySelector("#change_to_polygon")
-        let change_to_radius = this.querySelector("#change_to_radius")
-        change_to_polygon.addEventListener('click', async () => {
-            const { radius_input, polygon_input } = this._getZoneForm()
-            radius_input.style.display = "none"
-            polygon_input.style.display = "inline-block"
-            const { gcj02_longitude, gcj02_latitude, dx_polygon } = this._getZoneFormValues()
-            if (!dx_polygon) {
-                const polygon_arr = []
-                polygon_arr.push([(parseFloat(gcj02_longitude) + POLYGON_P).toFixed(6) + "," + (parseFloat(gcj02_latitude) + POLYGON_P).toFixed(6)])
-                polygon_arr.push([(parseFloat(gcj02_longitude) + POLYGON_P).toFixed(6) + "," + (parseFloat(gcj02_latitude) - POLYGON_P).toFixed(6)])
-                polygon_arr.push([(parseFloat(gcj02_longitude) - POLYGON_P).toFixed(6) + "," + (parseFloat(gcj02_latitude) - POLYGON_P).toFixed(6)])
-                polygon_arr.push([(parseFloat(gcj02_longitude) - POLYGON_P).toFixed(6) + "," + (parseFloat(gcj02_latitude) + POLYGON_P).toFixed(6)])
-                polygon_input.value = polygon_arr.join(';')
-            }
-            this._drawMap()
-        })
-        change_to_radius.addEventListener('click', async () => {
-            const { radius_input, polygon_input } = this._getZoneForm()
-            radius_input.style.display = "inline-block"
-            polygon_input.style.display = "none"
-            polygon_input.value = null
-            this._drawMap()
-        })
-        let zone_add = this.querySelector("#zone_add")
-        zone_add.addEventListener('click', async () => {
-            var zomeForm = this._getZoneForm()
-            zomeForm.entity_id_post_input.value = null
-            zomeForm.friendly_name_input.value = null
-            zomeForm.ll_input.value = null
-            zomeForm.radius_input.value = null
-            this._showZoneForm()
-            this._drawMap(true)
-        })
-        let zoneSetCancel = this.querySelector("#zoneSetCancel")
-        zoneSetCancel.addEventListener('click', () => {
-            this._hideZoneForm()
-            this._drawMap()
-        })
-        let zoneSetCommit = this.querySelector("#zoneSetCommit")
-        zoneSetCommit.addEventListener('click', async () => {
-            var valueObj = this._getZoneFormValues()
-            const entity_id = valueObj.entity_id
-            if (!valueObj.radius) {
-                valueObj.radius = 0
-            }
-            if (entity_id) {
-                // 编辑
-                await hass.callApi('post', 'dx/zone/save', {
-                    ...valueObj
-                })
-            } else {
-                // 创建
-                var v = {
-                    name: valueObj.friendly_name,
-                    latitude: 90,
-                    longitude: 90,
-                    radius: valueObj.radius,
-                    passive: false
-                }
-                const zone_new = await hass.callWS({
-                    type: "zone/create",
-                    ...v
-                })
-                await hass.callApi('post', 'dx/zone/save', {
-                    ...valueObj,
-                    entity_id: 'zone.' + zone_new.id
-                })
-            }
-            this._hideZoneForm()
-            this._drawMap()
-        })
-        let radiusInput = this.querySelector("#radius_input")
-        radiusInput.addEventListener('change', (e) => {
-            this._drawMap()
-        })
-        let friendly_name_input = this.querySelector("#friendly_name_input")
-        friendly_name_input.addEventListener('change', (e) => {
-            this._drawMap()
-        })
-        let ll_input = this.querySelector("#ll_input")
-        ll_input.addEventListener('change', (e) => {
-            this._drawMap(true)
-        })
-        let containerMin = this.querySelector("#containerMin")
-        let containerMax = this.querySelector("#containerMax")
-        let minDiv = this.querySelector("#minDiv")
-        let maxDiv = this.querySelector("#maxDiv")
-        containerMin.addEventListener('click', (e) => {
-            minDiv.style.display = 'block'
-            maxDiv.style.display = 'none'
-        })
-        containerMax.addEventListener('click', (e) => {
-            maxDiv.style.display = 'block'
-            minDiv.style.display = 'none'
-        })
 
-        let gps_set_cancel = this.querySelector("#gps_set_cancel")
-        gps_set_cancel.addEventListener('click', () => {
-            this._hideGpsForm()
-            this._drawMap()
-        })
-        let gpsSetTrajectory = this.querySelector("#gps_set_trajectory")
-        gpsSetTrajectory.addEventListener('click', async() => {
-            const { entity_id, trajectory_start_datetime_seconds, trajectory_end_datetime_seconds } = this._getGpsFormValues()
-            let trajectory_error = this.querySelector("#trajectory_error")
-            if (!trajectory_start_datetime_seconds || !trajectory_end_datetime_seconds) {
-                trajectory_error.innerHTML = "轨迹时间必填!"
-                return;
-            } else {
+    _drawOnce(hass) {
+        let change_to_polygon = this.shadowRoot.querySelector("#change_to_polygon")
+        let change_to_radius = this.shadowRoot.querySelector("#change_to_radius")
+
+        if (change_to_polygon) {
+            change_to_polygon.addEventListener('click', async () => {
+                const { radius_input, polygon_input } = this._getZoneForm()
+                radius_input.style.display = "none"
+                polygon_input.style.display = "inline-block"
+                const { gcj02_longitude, gcj02_latitude, dx_polygon } = this._getZoneFormValues()
+                if (!dx_polygon) {
+                    const polygon_arr = []
+                    polygon_arr.push([(parseFloat(gcj02_longitude) + POLYGON_P).toFixed(6) + "," + (parseFloat(gcj02_latitude) + POLYGON_P).toFixed(6)])
+                    polygon_arr.push([(parseFloat(gcj02_longitude) + POLYGON_P).toFixed(6) + "," + (parseFloat(gcj02_latitude) - POLYGON_P).toFixed(6)])
+                    polygon_arr.push([(parseFloat(gcj02_longitude) - POLYGON_P).toFixed(6) + "," + (parseFloat(gcj02_latitude) - POLYGON_P).toFixed(6)])
+                    polygon_arr.push([(parseFloat(gcj02_longitude) - POLYGON_P).toFixed(6) + "," + (parseFloat(gcj02_latitude) + POLYGON_P).toFixed(6)])
+                    polygon_input.value = polygon_arr.join(';')
+                }
+                this._drawMap()
+            })
+        }
+
+        if (change_to_radius) {
+            change_to_radius.addEventListener('click', async () => {
+                const { radius_input, polygon_input } = this._getZoneForm()
+                radius_input.style.display = "inline-block"
+                polygon_input.style.display = "none"
+                polygon_input.value = null
+                this._drawMap()
+            })
+        }
+
+        let zone_add = this.shadowRoot.querySelector("#zone_add")
+        if (zone_add) {
+            zone_add.addEventListener('click', async () => {
+                var zomeForm = this._getZoneForm()
+                zomeForm.entity_id_post_input.value = null
+                zomeForm.friendly_name_input.value = null
+                zomeForm.ll_input.value = null
+                zomeForm.radius_input.value = null
+                this._showZoneForm()
+                this._drawMap(true)
+            })
+        }
+
+        let zoneSetCancel = this.shadowRoot.querySelector("#zoneSetCancel")
+        if (zoneSetCancel) {
+            zoneSetCancel.addEventListener('click', () => {
+                this._hideZoneForm()
+                this._drawMap()
+            })
+        }
+
+        let zoneSetCommit = this.shadowRoot.querySelector("#zoneSetCommit")
+        if (zoneSetCommit) {
+            zoneSetCommit.addEventListener('click', async () => {
+                var valueObj = this._getZoneFormValues()
+                const entity_id = valueObj.entity_id
+                if (!valueObj.radius) {
+                    valueObj.radius = 0
+                }
+                if (entity_id) {
+                    // 编辑
+                    await hass.callApi('post', 'dx/zone/save', {
+                        ...valueObj
+                    })
+                } else {
+                    // 创建
+                    var v = {
+                        name: valueObj.friendly_name,
+                        latitude: 90,
+                        longitude: 90,
+                        radius: valueObj.radius,
+                        passive: false
+                    }
+                    const zone_new = await hass.callWS({
+                        type: "zone/create",
+                        ...v
+                    })
+                    await hass.callApi('post', 'dx/zone/save', {
+                        ...valueObj,
+                        entity_id: 'zone.' + zone_new.id
+                    })
+                }
+                this._hideZoneForm()
+                this._drawMap()
+            })
+        }
+
+        let radiusInput = this.shadowRoot.querySelector("#radius_input")
+        if (radiusInput) {
+            radiusInput.addEventListener('change', (e) => {
+                this._drawMap()
+            })
+        }
+
+        let friendly_name_input = this.shadowRoot.querySelector("#friendly_name_input")
+        if (friendly_name_input) {
+            friendly_name_input.addEventListener('change', (e) => {
+                this._drawMap()
+            })
+        }
+
+        let ll_input = this.shadowRoot.querySelector("#ll_input")
+        if (ll_input) {
+            ll_input.addEventListener('change', (e) => {
+                this._drawMap(true)
+            })
+        }
+
+        let containerMin = this.shadowRoot.querySelector("#containerMin")
+        let containerMax = this.shadowRoot.querySelector("#containerMax")
+        let minDiv = this.shadowRoot.querySelector("#minDiv")
+        let maxDiv = this.shadowRoot.querySelector("#maxDiv")
+
+        if (containerMin) {
+            containerMin.addEventListener('click', (e) => {
+                minDiv.style.display = 'block'
+                maxDiv.style.display = 'none'
+            })
+        }
+
+        if (containerMax) {
+            containerMax.addEventListener('click', (e) => {
+                maxDiv.style.display = 'block'
+                minDiv.style.display = 'none'
+            })
+        }
+
+        let gps_set_cancel = this.shadowRoot.querySelector("#gps_set_cancel")
+        if (gps_set_cancel) {
+            gps_set_cancel.addEventListener('click', () => {
+                this._hideGpsForm()
+                this._drawMap()
+            })
+        }
+
+        let gpsSetTrajectory = this.shadowRoot.querySelector("#gps_set_trajectory")
+        if (gpsSetTrajectory) {
+            gpsSetTrajectory.addEventListener('click', async () => {
+                const { entity_id, trajectory_start_datetime_seconds, trajectory_end_datetime_seconds } = this._getGpsFormValues()
+                let trajectory_error = this.shadowRoot.querySelector("#trajectory_error")
+                if (!trajectory_start_datetime_seconds || !trajectory_end_datetime_seconds) {
+                    trajectory_error.innerHTML = "轨迹时间必填!"
+                    return;
+                } else {
+                    trajectory_error.innerHTML = null
+                }
+                if (trajectory_start_datetime_seconds >= trajectory_end_datetime_seconds) {
+                    trajectory_error.innerHTML = "开始时间必须早于结束时间!"
+                    return;
+                }
+                let msg = await hass.callApi('get', `dx/gps/gps_list_from_db?entity_id=${encodeURIComponent(entity_id)}&start_time_seconds=${trajectory_start_datetime_seconds}&end_time_seconds=${trajectory_end_datetime_seconds}`)
+                if (!msg || msg.length === 0) {
+                    trajectory_error.innerHTML = "该时间范围内没有轨迹数据!"
+                    return;
+                }
+                var arr = []
+                for (let i = 0; i < msg.length; i++) {
+                    const element = msg[i];
+                    arr.push([parseFloat(element.gcj02_longitude), parseFloat(element.gcj02_latitude)])
+                }
                 trajectory_error.innerHTML = null
-            }
-            let msg = await hass.callApi('get', `dx/gps/gps_list_from_db?entity_id=${entity_id}&start_time_seconds=${trajectory_start_datetime_seconds}&end_time_seconds=${trajectory_end_datetime_seconds}`)
-            console.log(msg)
-            var arr = []
-            for (let i = 0; i < msg.length; i++) {
-                const element = msg[i];
-                arr.push([parseFloat(element.gcj02_longitude), element.gcj02_latitude])
-            }
-            this._toTrajectory(arr)
-        });
-        let satellite_input = this.querySelector("#satellite_input")
-        satellite_input.addEventListener('change', (e) => {
-            if (satellite_input.checked) {
-                this.amap.add(this.satelliteLayer)
-            } else {
-                this.amap.remove(this.satelliteLayer)
-            }
-        })
-        let roadnet_input = this.querySelector("#roadnet_input")
-        roadnet_input.addEventListener('change', (e) => {
-            if (roadnet_input.checked) {
-                this.amap.add(this.roadnetLayer)
-            } else {
-                this.amap.remove(this.roadnetLayer)
-            }
-        })
-        let traffic_input = this.querySelector("#traffic_input")
-        traffic_input.addEventListener('change', (e) => {
-            if (traffic_input.checked) {
-                this.amap.add(this.trafficLayer)
-            } else {
-                this.amap.remove(this.trafficLayer)
-            }
-        })
-    }
-    _showGpsForm(obj) {
-        this.amap.setCenter(obj.position)
-        let gpsSet = this.querySelector("#gps_set")
-        gpsSet.style = "display: block"
-        this.gpsEdit = true
-        const trajectory_start_datetime = this.querySelector("#trajectory_start_datetime")
-        const trajectory_end_datetime = this.querySelector("#trajectory_end_datetime")
-        // 设置结束时间为当前时间
-        const endDate = new Date();
-        trajectory_end_datetime.value = this.to_datetime_string(endDate);
-		// 设置开始时间为今天0点
-        const startDate = new Date();
-        startDate.setHours(0, 0, 0, 0);
-        trajectory_start_datetime.value = this.to_datetime_string(startDate);
-        if (this.config[CONFIG_DEFAULT_TRA_TIME]) {
-            const date = new Date()
-            trajectory_end_datetime.value = this.to_datetime_string(date);
-            date.setTime(date.getTime() - this.config[CONFIG_DEFAULT_TRA_TIME] * 60 * 1000);
-            trajectory_start_datetime.value = this.to_datetime_string(date);
+                this._toTrajectory(arr)
+            })
+        }
+
+        this._bindTrajectoryDatetimeInput("#trajectory_start_datetime")
+        this._bindTrajectoryDatetimeInput("#trajectory_end_datetime")
+
+        let satellite_input = this.shadowRoot.querySelector("#satellite_input")
+        if (satellite_input) {
+            satellite_input.addEventListener('change', (e) => {
+                if (!this.amap) return
+                if (satellite_input.checked) {
+                    this.amap.add(this.satelliteLayer)
+                } else {
+                    this.amap.remove(this.satelliteLayer)
+                }
+            })
+        }
+
+        let roadnet_input = this.shadowRoot.querySelector("#roadnet_input")
+        if (roadnet_input) {
+            roadnet_input.addEventListener('change', (e) => {
+                if (!this.amap) return
+                if (roadnet_input.checked) {
+                    this.amap.add(this.roadnetLayer)
+                } else {
+                    this.amap.remove(this.roadnetLayer)
+                }
+            })
+        }
+
+        let traffic_input = this.shadowRoot.querySelector("#traffic_input")
+        if (traffic_input) {
+            traffic_input.addEventListener('change', (e) => {
+                if (!this.amap) return
+                if (traffic_input.checked) {
+                    this.amap.add(this.trafficLayer)
+                } else {
+                    this.amap.remove(this.trafficLayer)
+                }
+            })
         }
     }
+
+    _showGpsForm(obj) {
+        if (!this.amap) return
+        this.amap.setCenter(obj.position)
+        let gpsSet = this.shadowRoot.querySelector("#gps_set")
+        if (gpsSet) {
+            gpsSet.style.display = "block"
+        }
+        this.gpsEdit = true
+        const trajectory_start_datetime = this.shadowRoot.querySelector("#trajectory_start_datetime")
+        const trajectory_end_datetime = this.shadowRoot.querySelector("#trajectory_end_datetime")
+
+        if (trajectory_end_datetime) {
+            const endDate = new Date();
+            trajectory_end_datetime.value = this.to_datetime_string(endDate);
+        }
+
+        if (trajectory_start_datetime) {
+            const startDate = new Date();
+            startDate.setHours(0, 0, 0, 0);
+            trajectory_start_datetime.value = this.to_datetime_string(startDate);
+        }
+
+        if (this.config && this.config[CONFIG_DEFAULT_TRA_TIME]) {
+            const date = new Date()
+            if (trajectory_end_datetime) {
+                trajectory_end_datetime.value = this.to_datetime_string(date);
+            }
+            date.setTime(date.getTime() - this.config[CONFIG_DEFAULT_TRA_TIME] * 60 * 1000);
+            if (trajectory_start_datetime) {
+                trajectory_start_datetime.value = this.to_datetime_string(date);
+            }
+        }
+    }
+
     _hideGpsForm() {
-        let gpsSet = this.querySelector("#gps_set")
-        gpsSet.style = "display: none"
+        let gpsSet = this.shadowRoot.querySelector("#gps_set")
+        if (gpsSet) {
+            gpsSet.style.display = "none"
+        }
         this.gpsEdit = false
         this._clearGpsFormValues()
         this._closeTrajectory()
     }
+
     _drawEditModeMap(set_center) {
+        if (!this.amap) return
         this.amap.clearMap()
         const valueObj = this._getZoneFormValues()
         const { friendly_name, gcj02_longitude, gcj02_latitude, radius, dx_polygon } = valueObj
         let position;
-        if (gcj02_longitude && gcj02_latitude) {
+        if (gcj02_longitude != null && gcj02_latitude != null) {
             position = [gcj02_longitude, gcj02_latitude]
         }
-        if (set_center) {
+        if (set_center && position) {
             this.amap.setCenter(position)
         }
         if (position) {
@@ -754,117 +869,149 @@ class Ha_gaode extends HTMLElement {
         if (polygon_arr && position) {
             var b = new AMap.Polygon(this._get_polygon_options(ZONE, polygon_arr))
             this.amap.add(b)
-            const polygon_input = this.querySelector("#polygon_input")
-            const polyEditor = new AMap.PolyEditor(this.amap, b)
-            polyEditor.on('adjust', function (event) {
-                console.info('触发事件： adjust', event.target.w.path)
-                let now_arr = []
-                let now_path_arr = event.target.w.path
-                for (let i = 0; i < now_path_arr.length; i++) {
-                    const { lng, lat } = now_path_arr[i]
-                    now_arr.push([lng.toFixed(6) + "," + lat.toFixed(6)])
-                }
-                polygon_input.value = now_arr.join(';')
-            })
-            polyEditor.open()
-        } else if (radius && position) {
+            const polygon_input = this.shadowRoot.querySelector("#polygon_input")
+            if (polygon_input) {
+                const polyEditor = new AMap.PolyEditor(this.amap, b)
+                polyEditor.on('adjust', function (event) {
+                    let now_arr = []
+                    let now_path_arr = event.target.getPath()
+                    for (let i = 0; i < now_path_arr.length; i++) {
+                        const lng = now_path_arr[i].lng
+                        const lat = now_path_arr[i].lat
+                        now_arr.push([lng.toFixed(6) + "," + lat.toFixed(6)])
+                    }
+                    polygon_input.value = now_arr.join(';')
+                })
+                polyEditor.open()
+            }
+        } else if (radius != null && position) {
             new AMap.Circle(this._get_circle_options(ZONE, radius, gcj02_longitude, gcj02_latitude))
         }
     }
+
     _showZoneForm() {
-        let zone_id_div = this.querySelector("#zone_id_div")
-        let radius_input = this.querySelector("#radius_input")
-        let polygon_input = this.querySelector("#polygon_input")
+        let zone_id_div = this.shadowRoot.querySelector("#zone_id_div")
+        let radius_input = this.shadowRoot.querySelector("#radius_input")
+        let polygon_input = this.shadowRoot.querySelector("#polygon_input")
 
         const valueObj = this._getZoneFormValues()
         const { entity_id, dx_polygon } = valueObj
-        if (!entity_id) {
-            zone_id_div.style = "display: none"
-        } else {
-            zone_id_div.style = "display: block"
+        if (!entity_id && zone_id_div) {
+            zone_id_div.style.display = "none"
+        } else if (zone_id_div) {
+            zone_id_div.style.display = "block"
         }
-        let zoneSet = this.querySelector("#zoneSet")
-        zoneSet.style = "display: block"
+        let zoneSet = this.shadowRoot.querySelector("#zoneSet")
+        if (zoneSet) {
+            zoneSet.style.display = "block"
+        }
         this.zoneEdit = true
         if (!dx_polygon || dx_polygon === '') {
-            radius_input.style.display = "inline-block"
-            polygon_input.style.display = "none"
+            if (radius_input) radius_input.style.display = "inline-block"
+            if (polygon_input) polygon_input.style.display = "none"
         } else {
-            radius_input.style.display = "none"
-            polygon_input.style.display = "inline-block"
+            if (radius_input) radius_input.style.display = "none"
+            if (polygon_input) polygon_input.style.display = "inline-block"
         }
-
     }
+
     _hideZoneForm() {
-        let zoneSet = this.querySelector("#zoneSet")
-        zoneSet.style = "display: none"
+        let zoneSet = this.shadowRoot.querySelector("#zoneSet")
+        if (zoneSet) {
+            zoneSet.style.display = "none"
+        }
         this.zoneEdit = false
         this._clearZoneFormValues()
     }
+
     _getGpsForm() {
         return {
-            gps_entity_id_post_input: this.querySelector("#gps_entity_id_post_input"),
-            gps_friendly_name_div: this.querySelector("#gps_friendly_name_div"),
-            trajectory_start_datetime: this.querySelector("#trajectory_start_datetime"),
-            trajectory_end_datetime: this.querySelector("#trajectory_end_datetime"),
-            trajectory_error: this.querySelector("#trajectory_error")
+            gps_entity_id_post_input: this.shadowRoot.querySelector("#gps_entity_id_post_input"),
+            gps_friendly_name_div: this.shadowRoot.querySelector("#gps_friendly_name_div"),
+            trajectory_start_datetime: this.shadowRoot.querySelector("#trajectory_start_datetime"),
+            trajectory_end_datetime: this.shadowRoot.querySelector("#trajectory_end_datetime"),
+            trajectory_error: this.shadowRoot.querySelector("#trajectory_error")
         }
     }
+
     _getZoneForm() {
         return {
-            friendly_name_input: this.querySelector("#friendly_name_input"),
-            ll_input: this.querySelector("#ll_input"),
-            radius_input: this.querySelector("#radius_input"),
-            entity_id_post_input: this.querySelector("#entity_id_post_input"),
-            polygon_input: this.querySelector("#polygon_input"),
+            friendly_name_input: this.shadowRoot.querySelector("#friendly_name_input"),
+            ll_input: this.shadowRoot.querySelector("#ll_input"),
+            radius_input: this.shadowRoot.querySelector("#radius_input"),
+            entity_id_post_input: this.shadowRoot.querySelector("#entity_id_post_input"),
+            polygon_input: this.shadowRoot.querySelector("#polygon_input"),
         }
     }
+
     _getZoneFormValues() {
-        const { ll_input, entity_id_post_input, friendly_name_input, radius_input, polygon_input } = this._getZoneForm()
-        const ll = ll_input.value
+        const form = this._getZoneForm()
+        const ll = form.ll_input?.value || ''
         const llArray = ll.split(",")
         return {
-            entity_id: entity_id_post_input.value,
-            friendly_name: friendly_name_input.value,
-            gcj02_longitude: llArray[0],
-            gcj02_latitude: llArray[1],
-            radius: parseInt(radius_input.value),
-            dx_polygon: polygon_input.value
+            entity_id: form.entity_id_post_input?.value || '',
+            friendly_name: form.friendly_name_input?.value || '',
+            gcj02_longitude: llArray[0] || '',
+            gcj02_latitude: llArray[1] || '',
+            radius: parseInt(form.radius_input?.value || '0'),
+            dx_polygon: form.polygon_input?.value || ''
         }
     }
+
     _getGpsFormValues() {
-        const { gps_entity_id_post_input, trajectory_start_datetime, trajectory_end_datetime, trajectory_error } = this._getGpsForm()
-        trajectory_error.innerHTML = null
+        const form = this._getGpsForm()
+        if (form.trajectory_error) {
+            form.trajectory_error.innerHTML = null
+        }
         let trajectory_start_datetime_seconds = null
-        if (trajectory_start_datetime.value) {
-            trajectory_start_datetime_seconds = Math.floor(new Date(trajectory_start_datetime.value) / 1000);
+        if (form.trajectory_start_datetime?.value) {
+            trajectory_start_datetime_seconds = Math.floor(new Date(form.trajectory_start_datetime.value) / 1000);
         }
         let trajectory_end_datetime_seconds = null
-        if (trajectory_end_datetime.value) {
-            trajectory_end_datetime_seconds = Math.floor(new Date(trajectory_end_datetime.value) / 1000);
+        if (form.trajectory_end_datetime?.value) {
+            trajectory_end_datetime_seconds = Math.floor(new Date(form.trajectory_end_datetime.value) / 1000);
         }
         return {
-            entity_id: gps_entity_id_post_input.value,
+            entity_id: form.gps_entity_id_post_input?.value || '',
             trajectory_start_datetime_seconds,
             trajectory_end_datetime_seconds,
         }
     }
+
+    _bindTrajectoryDatetimeInput(selector) {
+        const input = this.shadowRoot.querySelector(selector)
+        if (!input) return
+        const stopMapEvent = (e) => {
+            e.stopPropagation()
+        }
+        input.addEventListener('pointerdown', stopMapEvent)
+        input.addEventListener('click', stopMapEvent)
+        input.addEventListener('dblclick', (e) => {
+            stopMapEvent(e)
+            if (typeof input.showPicker === 'function') {
+                input.showPicker()
+            }
+        })
+    }
+
     _clearZoneFormValues() {
-        const { entity_id_post_input, friendly_name_input, ll_input, radius_input, polygon_input } = this._getZoneForm()
-        entity_id_post_input.value = null
-        friendly_name_input.value = null
-        ll_input.value = null
-        radius_input.value = null
-        polygon_input.value = null
+        const form = this._getZoneForm()
+        if (form.entity_id_post_input) form.entity_id_post_input.value = null
+        if (form.friendly_name_input) form.friendly_name_input.value = null
+        if (form.ll_input) form.ll_input.value = null
+        if (form.radius_input) form.radius_input.value = null
+        if (form.polygon_input) form.polygon_input.value = null
     }
+
     _clearGpsFormValues() {
-        const { gps_entity_id_post_input, gps_friendly_name_div, trajectory_start_datetime, trajectory_end_datetime, trajectory_error } = this._getGpsForm()
-        gps_entity_id_post_input.value = null
-        gps_friendly_name_div.innerHTML = null
-        trajectory_start_datetime.value = null
-        trajectory_end_datetime.value = null
-        trajectory_error.innerHTML = null
+        const form = this._getGpsForm()
+        if (form.gps_entity_id_post_input) form.gps_entity_id_post_input.value = null
+        if (form.gps_friendly_name_div) form.gps_friendly_name_div.innerHTML = null
+        if (form.trajectory_start_datetime) form.trajectory_start_datetime.value = null
+        if (form.trajectory_end_datetime) form.trajectory_end_datetime.value = null
+        if (form.trajectory_error) form.trajectory_error.innerHTML = null
     }
+
     _handleHass(hass) {
         let that = this
         let { states } = hass;
@@ -872,11 +1019,11 @@ class Ha_gaode extends HTMLElement {
         let now_zone_list = []
         let now_gps_list = []
         let has_change = false;
-        for(let stateKey in states) {
-            if (stateKey.startsWith('zone')) {
+        for (let stateKey in states) {
+            if (stateKey.startsWith('zone.')) {
                 let entity = states[stateKey]
                 let { longitude, latitude, gcj02_longitude, gcj02_latitude } = entity.attributes
-                if (longitude && latitude) {
+                if (longitude != null && latitude != null) {
                     const old_zone = this.zoneObj[stateKey]
                     if (old_zone) {
                         if (old_zone.last_updated != entity.last_updated) {
@@ -888,7 +1035,7 @@ class Ha_gaode extends HTMLElement {
                     this.zoneObj[stateKey] = entity
                 }
                 now_zone_list.push(stateKey)
-            } else if (stateKey.startsWith('device_tracker')) {
+            } else if (stateKey.startsWith('device_tracker.') || stateKey.startsWith('person.')) {
                 const entity = states[stateKey]
                 const { entity_id, attributes } = entity
                 if (device_tracker_include && device_tracker_include.length > 0) {
@@ -896,9 +1043,11 @@ class Ha_gaode extends HTMLElement {
                         continue;
                     }
                 }
-                if (entity.attributes.source_type = 'gps') {
-                    let { gcj02_longitude, gcj02_latitude } = attributes
-                    if (gcj02_longitude && gcj02_latitude) {
+                const position = this._getEntityPosition(attributes)
+                if (position) {
+                    const gcj02_longitude = position.lng
+                    const gcj02_latitude = position.lat
+                    if (gcj02_longitude != null && gcj02_latitude != null) {
                         const old_gps = this.gpsObj[stateKey]
                         if (old_gps) {
                             if (old_gps.last_updated != entity.last_updated) {
@@ -931,6 +1080,7 @@ class Ha_gaode extends HTMLElement {
             that._drawMap()
         }
     }
+
     _drawMap(set_center) {
         if (!this.amap) return
         if (this.trajectoryMode) return
@@ -938,92 +1088,107 @@ class Ha_gaode extends HTMLElement {
         if (that.zoneEdit) {
             this._drawEditModeMap(set_center)
         } else {
-            that.amap.clearMap()
+            const allOverlays = that.amap.getAllOverlays()
+            if (allOverlays && allOverlays.length > 0) {
+                that.amap.remove(allOverlays)
+            }
             for (let zoneKey in that.zoneObj) {
                 let zone = that.zoneObj[zoneKey]
-                let { gcj02_longitude, gcj02_latitude, friendly_name, radius, dx_polygon } = zone.attributes
-                if (gcj02_longitude && gcj02_latitude) {
+                const position = this._getEntityPosition(zone.attributes)
+                if (!position) {
+                    continue
+                }
+                const gcj02_longitude = position.lng
+                const gcj02_latitude = position.lat
+                const { friendly_name, radius, dx_polygon } = zone.attributes
+                if (gcj02_longitude != null && gcj02_latitude != null) {
                     new AMap.Marker(this._get_marker_options(ZONE, friendly_name, gcj02_longitude, gcj02_latitude))
                 }
-                if (gcj02_longitude && gcj02_latitude && dx_polygon) {
+                if (gcj02_longitude != null && gcj02_latitude != null && dx_polygon) {
                     const polygon_arr = this._transform_polygon_2_array(dx_polygon)
-                    this.amap.add(new AMap.Polygon(this._get_polygon_options(ZONE, polygon_arr)))
-                } else if (gcj02_longitude && gcj02_latitude && radius >= 0) {
+                    if (polygon_arr) {
+                        this.amap.add(new AMap.Polygon(this._get_polygon_options(ZONE, polygon_arr)))
+                    }
+                } else if (gcj02_longitude != null && gcj02_latitude != null && radius >= 0) {
                     new AMap.Circle(this._get_circle_options(ZONE, radius, gcj02_longitude, gcj02_latitude))
                 }
-
-
             }
-            for(let key in that.gpsObj) {
+            for (let key in that.gpsObj) {
                 let gps = that.gpsObj[key]
-                let { gcj02_longitude, gcj02_latitude, friendly_name } = gps.attributes
-                if (gcj02_longitude && gcj02_latitude) {
+                const position = this._getEntityPosition(gps.attributes)
+                if (!position) {
+                    continue
+                }
+                const gcj02_longitude = position.lng
+                const gcj02_latitude = position.lat
+                const friendly_name = gps.attributes.friendly_name || gps.entity_id
+                if (gcj02_longitude != null && gcj02_latitude != null) {
                     new AMap.Marker(this._get_marker_options(DEVICE_TRACKER, friendly_name, gcj02_longitude, gcj02_latitude))
                 }
             }
         }
     }
+
     _configMap(hass) {
         const that = this;
-        let mapContainer = this.querySelector("#mapContainer");
+        let mapContainer = this.shadowRoot.querySelector("#mapContainer");
         if (mapContainer) {
             this.amap = new AMap.Map(mapContainer, {
                 center: this._getCenter(hass),
                 zoom: 16,
                 resizeEnable: true,
+                expandZoomRange: true,
+                rotateEnable: true,
+                pitchEnable: true,
                 animateEnable: false,
                 jogEnable: false
             });
             // 图层
-            this.satelliteLayer= new AMap.TileLayer.Satellite();
+            this.satelliteLayer = new AMap.TileLayer.Satellite();
             this.roadnetLayer = new AMap.TileLayer.RoadNet()
             this.trafficLayer = new AMap.TileLayer.Traffic()
-            //异步加载插件
-            let map_search_input = this.querySelector("#map_search_input");
-            this.amap.plugin(['AMap.Autocomplete', 'AMap.PolyEditor'],function(){
-                const auto = new AMap.Autocomplete({
-                    input: map_search_input
-                });
-                auto.on('select', function (data) {
-                    const { name, location } = data.poi
-                    that.amap.setCenter(data.poi.location)
-                    const searchMarker = that.searchMarker
-                    if (searchMarker) {
-                        that.map.remove(searchMarker)
-                    }
-                    that.searchMarker = new AMap.Marker(that._get_marker_options(OTHER, name, location.lng, location.lat))
-                    // searchMarker
-                })
+
+            // 异步加载插件
+            this.amap.plugin(['AMap.Autocomplete', 'AMap.PolyEditor'], function () {
+                // 插件加载完成
             });
-            // this.amap.plugin('')
+
             // 地图点击事件处理
             this.amap.on('click', function (e) {
                 const lng = e.lnglat.lng
                 const lat = e.lnglat.lat
                 if (that.zoneEdit) {
-                    const llInput = that.querySelector("#ll_input")
-                    const polygon_input = that.querySelector("#polygon_input")
-                    const polygon_value = polygon_input.value
-                    if (polygon_value) {
+                    const llInput = that.shadowRoot.querySelector("#ll_input")
+                    const polygon_input = that.shadowRoot.querySelector("#polygon_input")
+                    const polygon_value = polygon_input?.value
+                    if (polygon_value && llInput) {
                         const polygon_array = that._transform_polygon_2_array(polygon_value)
-                        const old_llArray = llInput.value.split(",")
-                        const old_lng = parseFloat(old_llArray[0])
-                        const old_lat = parseFloat(old_llArray[1])
-                        const diff_lng = lng - old_lng
-                        const diff_lat = lat - old_lat
-                        let new_arr = []
-                        for (let i = 0; i < polygon_array.length; i++) {
-                            const inner_arr = polygon_array[i]
-                            new_arr.push((inner_arr[0] + diff_lng).toFixed(6) + "," + (inner_arr[1] + diff_lat).toFixed(6))
+                        if (polygon_array && llInput.value) {
+                            const old_llArray = llInput.value.split(",")
+                            const old_lng = parseFloat(old_llArray[0])
+                            const old_lat = parseFloat(old_llArray[1])
+                            const diff_lng = lng - old_lng
+                            const diff_lat = lat - old_lat
+                            let new_arr = []
+                            for (let i = 0; i < polygon_array.length; i++) {
+                                const inner_arr = polygon_array[i]
+                                new_arr.push((inner_arr[0] + diff_lng).toFixed(6) + "," + (inner_arr[1] + diff_lat).toFixed(6))
+                            }
+                            if (polygon_input) {
+                                polygon_input.value = new_arr.join(';')
+                            }
                         }
-                        polygon_input.value = new_arr.join(';')
                     }
-                    llInput.value = lng + "," + lat
+                    if (llInput) {
+                        llInput.value = lng + "," + lat
+                    }
                     that._drawMap()
                 } else {
-                    const click_ll_span = that.querySelector("#click_ll_span");
-                    click_ll_span.innerHTML = lng + "," + lat
-                    click_ll_span.style.color = random_color[Math.round(Math.random()*random_color.length - 1)]
+                    const click_ll_span = that.shadowRoot.querySelector("#click_ll_span");
+                    if (click_ll_span) {
+                        click_ll_span.innerHTML = lng + "," + lat
+                        click_ll_span.style.color = random_color[Math.round(Math.random() * (random_color.length - 1))]
+                    }
                 }
             })
             that._drawMap()
@@ -1031,16 +1196,16 @@ class Ha_gaode extends HTMLElement {
             this.mapLoading = false;
         }
     }
+
     _loadMap(hass) {
-        console.log("_loadMap...")
-        if (this.mapLoading) {return}
+        if (this.mapLoading) { return }
         this.mapLoading = true
         if (this.amap) {
             this.amap.destroy()
             this.amap = null
-            this.editZoneLayer = null
-            this.zoneMarkerObj = {}
-            this.zoneMarkerCircleObj = {}
+            this.satelliteLayer = null
+            this.roadnetLayer = null
+            this.trafficLayer = null
             this._configMap(hass)
             return;
         }
@@ -1049,44 +1214,47 @@ class Ha_gaode extends HTMLElement {
             securityJsCode: config[CONFIG_GAODE_KEY_SECURITY_CODE],
         }
         AMapLoader.load({
-            key: config[CONFIG_GAODE_KEY],       // 申请好的Web端开发者Key，首次调用 load 时必填
-        }).then((AMap)=>{
+            key: config[CONFIG_GAODE_KEY],
+        }).then((AMap) => {
             this._configMap(hass)
-        }).catch((e)=>{
-            console.error(e);  //加载错误提示
+        }).catch((e) => {
+            console.error(e);
+            this.mapLoading = false;
         });
     }
+
     setConfig(config) {
         if (!config[CONFIG_GAODE_KEY]) {
             throw new Error("请设置高德Key");
         }
         this.config = config;
     }
+
     _getCenter(hass) {
         let { states } = hass;
         let center = this.config[CONFIG_CENTER]
         // 中心点
-        let entity = states[center]
-        if (entity) {
-            const { gcj02_latitude, gcj02_longitude } = entity.attributes;
-            if (gcj02_latitude && gcj02_longitude) {
-                return [gcj02_longitude, gcj02_latitude]
+        if (center && states[center]) {
+            let entity = states[center]
+            const position = this._getEntityPosition(entity.attributes)
+            if (position) {
+                return [position.lng, position.lat]
             }
         }
         return null
     }
+
     to_datetime_string(date) {
-         if (!date) return '';
+        if (!date) return '';
         var year = date.getFullYear();
         var month = ('0' + (date.getMonth() + 1)).slice(-2);
         var day = ('0' + date.getDate()).slice(-2);
         var hours = ('0' + date.getHours()).slice(-2);
         var minutes = ('0' + date.getMinutes()).slice(-2);
-        // return year + '-' + month + '-' + day + 'T' + hours + ':' + minutes;
         return `${year}-${month}-${day}T${hours}:${minutes}`;
     }
+
     _transform_polygon_2_array(polygon) {
-        console.log(polygon)
         if (!polygon || polygon === '') {
             return null
         }
@@ -1094,9 +1262,18 @@ class Ha_gaode extends HTMLElement {
         const ll_arr = polygon.split(';')
         for (let i = 0; i < ll_arr.length; i++) {
             const ll = ll_arr[i].split(",")
-            return_arr.push([parseFloat(ll[0]),parseFloat(ll[1])])
+            if (ll.length === 2) {
+                return_arr.push([parseFloat(ll[0]), parseFloat(ll[1])])
+            }
         }
-        return return_arr
+        return return_arr.length > 0 ? return_arr : null
+    }
+
+    disconnectedCallback() {
+        if (this.amap) {
+            this.amap.destroy()
+            this.amap = null
+        }
     }
 }
 
